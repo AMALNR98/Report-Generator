@@ -412,52 +412,6 @@ def containing_range(row_idx, col_idx, ranges):
     return None
 
 
-def body_merge_patterns(ranges):
-    patterns = []
-    for merged_range in ranges:
-        if merged_range["min_row"] <= START_ROW <= merged_range["max_row"]:
-            patterns.append(
-                {
-                    "min_col": merged_range["min_col"],
-                    "max_col": merged_range["max_col"],
-                    "row_span": merged_range["max_row"] - merged_range["min_row"],
-                }
-            )
-    return patterns
-
-
-def ensure_body_merges(sheet_root, ranges, max_row):
-    patterns = body_merge_patterns(ranges)
-    if not patterns:
-        return ranges
-
-    merge_cells = sheet_root.find(ns_tag("mergeCells"))
-    if merge_cells is None:
-        merge_cells = ET.Element(ns_tag("mergeCells"))
-        sheet_data = sheet_root.find(ns_tag("sheetData"))
-        children = list(sheet_root)
-        insert_at = children.index(sheet_data) + 1 if sheet_data in children else len(children)
-        sheet_root.insert(insert_at, merge_cells)
-
-    existing = {merge_cell.attrib.get("ref") for merge_cell in merge_cells.findall(ns_tag("mergeCell"))}
-    for row_idx in range(START_ROW, max_row + 1):
-        for pattern in patterns:
-            ref = range_ref(row_idx, pattern["min_col"], row_idx + pattern["row_span"], pattern["max_col"])
-            if ref not in existing:
-                merge_cells.append(ET.Element(ns_tag("mergeCell"), {"ref": ref}))
-                existing.add(ref)
-                ranges.append(
-                    {
-                        "min_row": row_idx,
-                        "max_row": row_idx + pattern["row_span"],
-                        "min_col": pattern["min_col"],
-                        "max_col": pattern["max_col"],
-                    }
-                )
-    merge_cells.set("count", str(len(merge_cells.findall(ns_tag("mergeCell")))))
-    return ranges
-
-
 def writable_position(row_idx, col_idx, ranges):
     for merged_range in ranges:
         if (
@@ -531,8 +485,9 @@ def base_style_for_column(cell_styles, col_idx):
     return None
 
 
-def set_cell_value(sheet_data, row_idx, col_idx, value, ranges, row_attrs=None, style_id=None):
-    row_idx, col_idx = writable_position(row_idx, col_idx, ranges)
+def set_cell_value(sheet_data, row_idx, col_idx, value, ranges, row_attrs=None, style_id=None, respect_merges=True):
+    if respect_merges:
+        row_idx, col_idx = writable_position(row_idx, col_idx, ranges)
     row = get_or_create_row(sheet_data, row_idx)
     if row_attrs is not None:
         apply_row_style(row, row_idx, row_attrs)
@@ -780,13 +735,12 @@ def filled_report_workbook(report_type, rows, metadata=None):
             max_row = sheet_max_row(sheet_root)
             required_max_row = max(max_row, START_ROW + len(rows) - 1)
             max_col = max(sheet_max_col(sheet_data), max(field_columns.values()))
-            ranges = ensure_body_merges(sheet_root, ranges, required_max_row)
             update_sheet_dimension(sheet_root, required_max_row, max_col)
 
             for row_idx in range(START_ROW, required_max_row + 1):
                 apply_body_row_format(sheet_data, row_idx, max_col, row_attrs, cell_styles, ranges)
                 for field, col_idx in field_columns.items():
-                    set_cell_value(sheet_data, row_idx, col_idx, "", ranges, row_attrs, default_styles.get(field))
+                    set_cell_value(sheet_data, row_idx, col_idx, "", ranges, row_attrs, default_styles.get(field), respect_merges=False)
 
             for offset, row in enumerate(rows):
                 excel_row = START_ROW + offset
@@ -794,7 +748,7 @@ def filled_report_workbook(report_type, rows, metadata=None):
                     style_id = default_styles.get(field)
                     if field == "Alert Level":
                         style_id = alert_styles.get(clean_text(row.get(field, "")).upper(), style_id)
-                    set_cell_value(sheet_data, excel_row, col_idx, row.get(field, ""), ranges, row_attrs, style_id)
+                    set_cell_value(sheet_data, excel_row, col_idx, row.get(field, ""), ranges, row_attrs, style_id, respect_merges=False)
 
             report_index = sheet_paths.index(report_sheet)
             updated_sheet = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
