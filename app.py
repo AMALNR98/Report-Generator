@@ -204,6 +204,16 @@ def sanitize_rows(rows):
     return sanitized
 
 
+def sanitize_metadata(metadata):
+    if not isinstance(metadata, dict):
+        return {}
+    return {
+        "report_date": clean_text(metadata.get("report_date", "")),
+        "client_name": clean_text(metadata.get("client_name", "")),
+        "analyst": clean_text(metadata.get("analyst", "")),
+    }
+
+
 def preview_workbook(rows):
     workbook = Workbook()
     worksheet = workbook.active
@@ -366,6 +376,16 @@ def merged_ranges(sheet_root):
     return ranges
 
 
+def containing_range(row_idx, col_idx, ranges):
+    for merged_range in ranges:
+        if (
+            merged_range["min_row"] <= row_idx <= merged_range["max_row"]
+            and merged_range["min_col"] <= col_idx <= merged_range["max_col"]
+        ):
+            return merged_range
+    return None
+
+
 def body_merge_patterns(ranges):
     patterns = []
     for merged_range in ranges:
@@ -506,6 +526,43 @@ def set_cell_value(sheet_data, row_idx, col_idx, value, ranges, row_attrs=None, 
     text.text = clean_text(value)
 
 
+def header_metadata_targets(sheet_root, shared_strings, ranges):
+    sheet_data = sheet_root.find(ns_tag("sheetData"))
+    hidden = hidden_columns(sheet_root)
+    labels = {
+        "date": "report_date",
+        "client name": "client_name",
+        "analyst": "analyst",
+    }
+    targets = {}
+    for row in sheet_data.findall(ns_tag("row")):
+        row_idx = int(row.attrib.get("r", "0"))
+        if row_idx >= HEADER_ROW:
+            continue
+        for cell in row.findall(ns_tag("c")):
+            col_idx = col_num_from_ref(cell.attrib.get("r", ""))
+            label = normalize_header(cell_text(cell, shared_strings)).rstrip(":")
+            label = normalize_header(label)
+            field = labels.get(label)
+            if not field or field in targets:
+                continue
+            label_range = containing_range(row_idx, col_idx, ranges)
+            target_col = (label_range["max_col"] if label_range else col_idx) + 1
+            while target_col in hidden:
+                target_col += 1
+            targets[field] = (row_idx, target_col)
+    return targets
+
+
+def write_report_metadata(sheet_root, shared_strings, ranges, metadata):
+    sheet_data = sheet_root.find(ns_tag("sheetData"))
+    targets = header_metadata_targets(sheet_root, shared_strings, ranges)
+    for field, value in metadata.items():
+        if value and field in targets:
+            row_idx, col_idx = targets[field]
+            set_cell_value(sheet_data, row_idx, col_idx, value, ranges)
+
+
 def template_field_columns(sheet_root, shared_strings):
     field_columns = {}
     field_names = {normalize_header(field): field for field in OUTPUT_FIELDS}
@@ -616,7 +673,7 @@ def alert_level_style_map(styles_xml, base_style_id):
     }
 
 
-def filled_report_workbook(report_type, rows):
+def filled_report_workbook(report_type, rows, metadata=None):
     if not rows:
         raise ValueError("No processed alert rows were provided. Process a raw alert file before generating the report.")
 
@@ -640,6 +697,7 @@ def filled_report_workbook(report_type, rows):
                 raise ValueError('The selected template "Report" worksheet is missing sheet data.')
 
             ranges = merged_ranges(sheet_root)
+            write_report_metadata(sheet_root, shared_strings, ranges, sanitize_metadata(metadata or {}))
             field_columns = template_field_columns(sheet_root, shared_strings)
             row_attrs, cell_styles = row_style_template(sheet_data)
             default_styles = {
@@ -754,8 +812,9 @@ def download():
         payload = request.get_json(silent=True) or {}
         report_type = validate_report_type(payload.get("report_type", ""))
         rows = sanitize_rows(payload.get("rows", []))
+        metadata = sanitize_metadata(payload.get("metadata", {}))
         filename = f"{REPORT_TYPES[report_type]['filename_prefix']}_{today_string()}.xlsx"
-        return excel_response(filled_report_workbook(report_type, rows), filename)
+        return excel_response(filled_report_workbook(report_type, rows, metadata), filename)
     except ValueError as exc:
         return jsonify({"ok": False, "error": clean_text(exc)}), 400
 
@@ -864,6 +923,32 @@ INDEX_HTML = """
       background: #132b38;
     }
     input[type="file"] { display: none; }
+    .manual-grid {
+      display: grid;
+      gap: 10px;
+    }
+    .manual-grid label {
+      display: grid;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--muted);
+    }
+    .manual-grid input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      min-height: 40px;
+      padding: 9px 11px;
+      font: inherit;
+    }
+    .manual-grid input:focus {
+      border-color: var(--accent);
+      outline: none;
+      box-shadow: 0 0 0 2px rgba(40, 167, 199, .16);
+    }
     .file-button, button {
       appearance: none;
       border: 1px solid transparent;
@@ -1035,6 +1120,21 @@ INDEX_HTML = """
         </div>
 
         <div class="group">
+          <h2>Report Details</h2>
+          <div class="manual-grid">
+            <label for="reportDate">Date
+              <input id="reportDate" type="text" placeholder="e.g. 2026-05-11">
+            </label>
+            <label for="clientName">Client Name
+              <input id="clientName" type="text" placeholder="Client name">
+            </label>
+            <label for="analystName">Analyst
+              <input id="analystName" type="text" placeholder="Analyst name">
+            </label>
+          </div>
+        </div>
+
+        <div class="group">
           <h2>Save Location</h2>
           <div class="template-pill">
             <span id="saveCapability"></span>
@@ -1102,6 +1202,9 @@ INDEX_HTML = """
     const saveBtn = document.getElementById("saveBtn");
     const previewBtn = document.getElementById("previewBtn");
     const reportBtn = document.getElementById("reportBtn");
+    const reportDate = document.getElementById("reportDate");
+    const clientName = document.getElementById("clientName");
+    const analystName = document.getElementById("analystName");
 
     function selectedReportType() {
       return new FormData(form).get("report_type");
@@ -1123,6 +1226,14 @@ INDEX_HTML = """
       saveBtn.disabled = !enabled;
       previewBtn.disabled = !enabled;
       reportBtn.disabled = !enabled;
+    }
+
+    function reportMetadata() {
+      return {
+        report_date: reportDate.value.trim(),
+        client_name: clientName.value.trim(),
+        analyst: analystName.value.trim()
+      };
     }
 
     function validExcelFile(file) {
@@ -1289,7 +1400,11 @@ INDEX_HTML = """
     reportBtn.addEventListener("click", async () => {
       try {
         setStatus("Generating report from the selected local template...");
-        const filename = await downloadBlob("/download", { report_type: currentReportType, rows: processedRows }, "Alert_Report.xlsx");
+        const filename = await downloadBlob(
+          "/download",
+          { report_type: currentReportType, rows: processedRows, metadata: reportMetadata() },
+          "Alert_Report.xlsx"
+        );
         setStatus(`Report ready: ${filename}`, "ok");
       } catch (error) {
         setStatus(error.message, "error");
@@ -1301,7 +1416,7 @@ INDEX_HTML = """
         setStatus("Preparing report save...");
         const filename = await downloadBlob(
           "/download",
-          { report_type: currentReportType, rows: processedRows },
+          { report_type: currentReportType, rows: processedRows, metadata: reportMetadata() },
           "Alert_Report.xlsx",
           Boolean(window.showSaveFilePicker)
         );
@@ -1318,6 +1433,7 @@ INDEX_HTML = """
     saveCapability.textContent = window.showSaveFilePicker
       ? "Folder save supported by this browser"
       : "Browser download fallback will be used";
+    reportDate.value = new Date().toISOString().slice(0, 10);
     updateTemplateStatus();
   </script>
 </body>
