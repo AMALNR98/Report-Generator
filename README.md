@@ -69,8 +69,8 @@ The uploaded raw alert export must include:
 - `Type`
 - `Severity`
 - `Confidence`
-- `Origin.1` or `Origin`
-- `Entity.1` or `Entity`
+- second `Origin` column, normally Excel column `H`
+- second `Entity` column, normally Excel column `K`
 - `Entity Type`
 - `Status`
 - `Message`
@@ -83,8 +83,8 @@ Field mapping:
 - `Type` -> `Type of Alert`
 - `Severity` -> `Alert Level`
 - `Confidence` -> `Severity`
-- `Origin.1`, fallback `Origin` -> `Origin`
-- `Entity.1`, fallback `Entity` -> `Entity`
+- `Origin` second column, normally Excel column `H` -> `Origin`
+- `Entity` column `K` -> `Entity`
 - `Entity Type` -> `Entity Type`
 - `Status` -> `Status`
 - `Message` -> `Message`
