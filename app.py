@@ -193,6 +193,32 @@ def compute_stats(rows):
     }
 
 
+def alert_summary_values(rows):
+    def norm(row, field):
+        return clean_text(row.get(field, "")).upper()
+
+    critical_rows = [row for row in rows if norm(row, "Alert Level") == "CRITICAL"]
+    major_rows = [row for row in rows if norm(row, "Alert Level") == "MAJOR"]
+    non_critical_rows = [row for row in rows if norm(row, "Alert Level") != "CRITICAL"]
+    notified_rows = [row for row in rows if norm(row, "SLA (Y/N)") == "Y"]
+
+    def unique_entities(source_rows):
+        return len({clean_text(row.get("Entity")) for row in source_rows if clean_text(row.get("Entity"))})
+
+    return {
+        "total critical alert count %": str(len(critical_rows)),
+        "total critical alert notified to customer %": str(sum(1 for row in critical_rows if norm(row, "SLA (Y/N)") == "Y")),
+        "closed major alert count with customer consent %": "0",
+        "total major alert count %": str(len(major_rows)),
+        "total major alert notified to customer %": str(sum(1 for row in major_rows if norm(row, "SLA (Y/N)") == "Y")),
+        "closed critical alert count with customer consent %": "0",
+        "total device (critical) %": "0",
+        "total device (non-critical) %": "0",
+        "system alert notified %": "0",
+        "sla met (y/n/not applicable) %": "Y",
+    }
+
+
 def sanitize_rows(rows):
     if not isinstance(rows, list):
         raise ValueError("Processed rows must be provided as a JSON array.")
@@ -554,12 +580,53 @@ def header_metadata_targets(sheet_root, shared_strings, ranges):
     return targets
 
 
+def label_value_targets(sheet_root, shared_strings, ranges, label_keys):
+    sheet_data = sheet_root.find(ns_tag("sheetData"))
+    hidden = hidden_columns(sheet_root)
+    normalized_keys = {}
+    for key in label_keys:
+        base = normalize_header(key)
+        without_percent = normalize_header(base.rstrip("%").strip())
+        with_paren_percent = normalize_header(base.replace(" %", " (%)"))
+        normalized_keys[base] = key
+        normalized_keys[without_percent] = key
+        normalized_keys[with_paren_percent] = key
+    targets = {}
+    for row in sheet_data.findall(ns_tag("row")):
+        row_idx = int(row.attrib.get("r", "0"))
+        if row_idx >= HEADER_ROW:
+            continue
+        for cell in row.findall(ns_tag("c")):
+            col_idx = col_num_from_ref(cell.attrib.get("r", ""))
+            label = normalize_header(cell_text(cell, shared_strings)).rstrip(":")
+            label = normalize_header(label)
+            key = normalized_keys.get(label)
+            if not key or key in targets:
+                continue
+            label_range = containing_range(row_idx, col_idx, ranges)
+            target_col = (label_range["max_col"] if label_range else col_idx) + 1
+            while target_col in hidden:
+                target_col += 1
+            targets[key] = (row_idx, target_col)
+    return targets
+
+
 def write_report_metadata(sheet_root, shared_strings, ranges, metadata):
     sheet_data = sheet_root.find(ns_tag("sheetData"))
     targets = header_metadata_targets(sheet_root, shared_strings, ranges)
     for field, value in metadata.items():
         if value and field in targets:
             row_idx, col_idx = targets[field]
+            set_cell_value(sheet_data, row_idx, col_idx, value, ranges)
+
+
+def write_report_summary(sheet_root, shared_strings, ranges, rows):
+    sheet_data = sheet_root.find(ns_tag("sheetData"))
+    values = alert_summary_values(rows)
+    targets = label_value_targets(sheet_root, shared_strings, ranges, values.keys())
+    for label, value in values.items():
+        if label in targets:
+            row_idx, col_idx = targets[label]
             set_cell_value(sheet_data, row_idx, col_idx, value, ranges)
 
 
@@ -698,6 +765,7 @@ def filled_report_workbook(report_type, rows, metadata=None):
 
             ranges = merged_ranges(sheet_root)
             write_report_metadata(sheet_root, shared_strings, ranges, sanitize_metadata(metadata or {}))
+            write_report_summary(sheet_root, shared_strings, ranges, rows)
             field_columns = template_field_columns(sheet_root, shared_strings)
             row_attrs, cell_styles = row_style_template(sheet_data)
             default_styles = {
